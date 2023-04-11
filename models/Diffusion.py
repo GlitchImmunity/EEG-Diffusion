@@ -91,7 +91,7 @@ class ResnetBlock(nn.Module):
             time_scale, time_shift = time_scale_shift
             
         #if self.sss:
-        #    temp = self.tss_act(subject)
+        #    temp = self.tss_act(time)
         #    temp = self.tss_linear(temp)
         #    temp = rearrange(temp, 'b c -> b c 1')
         #    subject_scale_shift = temp.chunk(2, dim=1)
@@ -321,6 +321,7 @@ class EEGDiffusion(pl.LightningModule):
         us=(1,2,4,8),
         seq_length=250,
         timesteps=500,
+        noise=[1e-4,0.02],
         sampling_timesteps=None,
         device="cuda"
         ):
@@ -332,7 +333,7 @@ class EEGDiffusion(pl.LightningModule):
         self.lr = lr
         
         # Here is our betas: linearly increasing noise strength 
-        self.betas = torch.linspace(1e-4, 0.02, timesteps)
+        self.betas = torch.linspace(noise[0], noise[1], timesteps)
         self.alphas = 1 - self.betas
         
         # As defined by paper
@@ -454,10 +455,6 @@ class EEGDiffusion(pl.LightningModule):
 
     
     
-    
-    
-
-    
 
     
 class ResAttention_Hybrid(nn.Module):
@@ -468,7 +465,7 @@ class ResAttention_Hybrid(nn.Module):
         
         self.norm1 = nn.BatchNorm1d(dimension)
         self.conv_qkv = nn.Conv1d(dimension, 3*heads*head_dimension, 1, bias=False)
-        self.conv_q = nn.Conv1d(dimension, heads*head_dimension, 1, bias=False)
+        self.conv_q = nn.Conv1d(heads*head_dimension, heads*head_dimension, 1, bias=False)
         self.conv_v = nn.Linear(x_class_dim, heads*head_dimension)
         self.conv_k = nn.Linear(x_class_dim, heads*head_dimension)
         self.attention = nn.MultiheadAttention(heads*head_dimension, heads, batch_first=True)
@@ -481,7 +478,7 @@ class ResAttention_Hybrid(nn.Module):
         out = self.norm1(x)
         qkv = self.conv_qkv(out)
         qkv = qkv.chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) n -> b h c n', h = self.heads), qkv)
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) l -> b h c l', h = self.heads), qkv)
 
         q = q.softmax(dim = -2)
         k = k.softmax(dim = -1)
@@ -491,16 +488,16 @@ class ResAttention_Hybrid(nn.Module):
         context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
 
         out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-        out = rearrange(out, 'b h c n -> b (h c) n', h = self.heads)
+        out = rearrange(out, 'b h c l -> b (h c) l', h = self.heads)
         
         query = self.conv_q(out)
-        query = rearrange(query, 'b (h c) l -> b l (h c)', h=self.heads)
+        query = torch.transpose(query, 1, 2)
         key = self.conv_k(x_class)
         key = key[:, None, :]
         value = self.conv_v(x_class)
         value = value[:, None, :]
         out, _ = self.attention(query, key, value)
-        query = rearrange(query, 'b l (h c) -> b (h c) l', h=self.heads)
+        out = torch.transpose(out, 1, 2)
         
         out = self.conv_out(out)
         #print(out.shape)
@@ -669,13 +666,7 @@ class Unet_Hybrid(nn.Module):
 # Orignal Diffusion Paper:
 # https://arxiv.org/pdf/2006.11239.pdf#page5
 # https://huggingface.co/blog/annotated-diffusion
-# Helper function to extract data to be of specific shape
-def helper_extract(data, timesteps, shape):
-    # Throws device error if not specified
-    device = timesteps.device
-    out = torch.gather(data, -1, timesteps.cpu())
-    return out.reshape(timesteps.shape[0], *((1,) * (len(shape) - 1))).to(timesteps.device)
-        
+# Helper function to extract data to be of specific shape      
 class EEGDiffusion_Hybrid(pl.LightningModule):
     def __init__(
         self,
@@ -685,6 +676,7 @@ class EEGDiffusion_Hybrid(pl.LightningModule):
         seq_length=250,
         timesteps=500,
         sampling_timesteps=None,
+        noise = [1e-4, 0.02],
         device="cuda"
         ):
         super().__init__()
@@ -695,7 +687,7 @@ class EEGDiffusion_Hybrid(pl.LightningModule):
         self.lr = lr
         
         # Here is our betas: linearly increasing noise strength 
-        self.betas = torch.linspace(1e-4, 0.02, timesteps)
+        self.betas = torch.linspace(noise[0], noise[1], timesteps)
         self.alphas = 1 - self.betas
         
         # As defined by paper
@@ -767,21 +759,26 @@ class EEGDiffusion_Hybrid(pl.LightningModule):
             
     # Algorithm 2
     @torch.no_grad()
-    def p_sample_loop(self, x_class, shape):
+    def p_sample_loop(self, x_class, shape, initialize=None, timesteps=None):
         b, c, l = shape
         
         noisy_start = torch.randn(shape)
         noisy_start = noisy_start.to(self.device)
+        if not initialize is None:
+            noisy_start += initialize
+        t = self.timesteps
+        if not timesteps is None:
+            t = timesteps
         denoise = []
         
-        for i in tqdm(reversed(range(0, self.timesteps)), total=self.timesteps):
+        for i in tqdm(reversed(range(0, t)), total=t):
             noisy_start = self.p_sample(noisy_start, torch.full((b,), i, device=self.device, dtype=torch.long), i, x_class)
             denoise.append(noisy_start.cpu().numpy())
         return denoise
         
     @torch.no_grad()
-    def sampling(self, x_class, batch_size=1, channels=22, sequence_length=250):
-        return self.p_sample_loop(x_class, (batch_size, channels, sequence_length))
+    def sampling(self, x_class, batch_size=1, channels=22, sequence_length=250, initialize=None, timesteps=None):
+        return self.p_sample_loop(x_class, (batch_size, channels, sequence_length), initialize, timesteps)
         
     def training_step(self, batch, batch_IX):
         data, data_class, data_subject = batch
