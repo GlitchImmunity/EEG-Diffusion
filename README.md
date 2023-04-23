@@ -1,3 +1,11 @@
+# Roadmap
+	- [ ] Restructure notebooks
+    - [ ] Implement proper cross attention
+    - [ ] Implement modern UNET architectures
+    - [ ] Try OpenAI's model
+    - [ ] Retrain for very low loss
+    - [ ] Setup better notebook for experiments
+
 # EEG-Project
 This is a deep learning classification of EEG signals using CNN, CNN-LSTM, CNN-MHA. Training data was also used to create a 1D diffusion model that would produce synthetic EEG samples using a linear beta scheduler.
 
